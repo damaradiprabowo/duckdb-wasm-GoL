@@ -18,8 +18,9 @@ const fpsEl = $("fps");
 const playBtn = $("play") as HTMLButtonElement;
 
 const dpr = window.devicePixelRatio || 1;
+// Set only the CSS width; height stays `auto` (see style.css) so the board
+// keeps its aspect ratio when it scales down to fit a narrow screen.
 canvas.style.width = `${COLS * CELL}px`;
-canvas.style.height = `${ROWS * CELL}px`;
 canvas.width = COLS * CELL * dpr;
 canvas.height = ROWS * CELL * dpr;
 ctx.scale(dpr, dpr);
@@ -151,32 +152,56 @@ presetSel.onchange = async () => {
   await refresh();
 };
 
-// --- Click / drag to edit -------------------------------------------------
+// --- Edit cells: mouse/pen drag to paint, touch tap to toggle -------------
+// On touch we deliberately do NOT capture the gesture, so the page can still
+// scroll past the board. A short, near-stationary press counts as a tap.
 let painting = false;
 let paintState = true;
+let pointerStart: { x: number; y: number; t: number; type: string } | null = null;
 
-function cellFromEvent(e: MouseEvent): [number, number] {
+function cellFromPoint(clientX: number, clientY: number): [number, number] {
   const rect = canvas.getBoundingClientRect();
-  const x = Math.floor(((e.clientX - rect.left) / rect.width) * COLS);
-  const y = Math.floor(((e.clientY - rect.top) / rect.height) * ROWS);
+  const x = Math.floor(((clientX - rect.left) / rect.width) * COLS);
+  const y = Math.floor(((clientY - rect.top) / rect.height) * ROWS);
   return [x, y];
 }
 
-canvas.addEventListener("mousedown", async (e) => {
+canvas.addEventListener("pointerdown", async (e) => {
+  pointerStart = { x: e.clientX, y: e.clientY, t: e.timeStamp, type: e.pointerType };
+  if (e.pointerType === "touch") return; // let the tap/scroll resolve on pointerup
+  e.preventDefault();
   setPlaying(false);
-  const [x, y] = cellFromEvent(e);
+  const [x, y] = cellFromPoint(e.clientX, e.clientY);
   paintState = await game.toggle(x, y);
   painting = true;
   await refresh();
 });
 
-canvas.addEventListener("mousemove", async (e) => {
-  if (!painting) return;
-  const [x, y] = cellFromEvent(e);
+canvas.addEventListener("pointermove", async (e) => {
+  if (!painting || e.pointerType === "touch") return;
+  const [x, y] = cellFromPoint(e.clientX, e.clientY);
   await game.setCell(x, y, paintState);
   await refresh();
 });
 
-window.addEventListener("mouseup", () => {
+canvas.addEventListener("pointerup", async (e) => {
+  if (e.pointerType === "touch" && pointerStart?.type === "touch") {
+    const moved = Math.hypot(e.clientX - pointerStart.x, e.clientY - pointerStart.y);
+    if (moved < 12 && e.timeStamp - pointerStart.t < 500) {
+      setPlaying(false);
+      const [x, y] = cellFromPoint(e.clientX, e.clientY);
+      await game.toggle(x, y);
+      await refresh();
+    }
+  }
   painting = false;
+  pointerStart = null;
+});
+
+canvas.addEventListener("pointercancel", () => {
+  painting = false;
+  pointerStart = null;
+});
+window.addEventListener("pointerup", () => {
+  painting = false; // stop a drag-paint that ended off the canvas
 });

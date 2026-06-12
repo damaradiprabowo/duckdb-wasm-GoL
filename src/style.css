@@ -156,6 +156,8 @@ select {
 .steps { list-style: none; margin: 0 0 36px; padding: 0; display: flex; flex-direction: column; gap: 4px; }
 .steps li { display: flex; gap: 16px; align-items: flex-start; padding: 14px 0; border-top: 1px solid var(--hairline); }
 .steps li:first-child { border-top: none; }
+/* let the text/code column shrink so wide SQL scrolls instead of widening the page */
+.steps li > div { min-width: 0; flex: 1; }
 .steps .n {
   flex: 0 0 28px;
   height: 28px;
@@ -265,3 +267,17 @@ footer { text-align: center; color: var(--muted); font-size: 0.85rem; }
 footer a { color: var(--accent); text-decoration: none; }
 footer a:hover { text-decoration: underline; }
 footer .dot { margin: 0 6px; opacity: 0.5; }
+
+/* ---- small screens ---- */
+@media (max-width: 600px) {
+  main { padding: 32px 16px 40px; gap: 22px; }
+  .card { padding: 18px 16px; }
+  h1 { font-size: 2rem; }
+  .toolbar { gap: 14px; }
+  .group { gap: 8px; }
+  input[type="range"] { width: 90px; }
+  .essay p { font-size: 1rem; max-width: none; }
+  .essay .coda { font-size: 1.05rem; }
+  .steps p { max-width: none; }
+  .pullquote { font-size: 1.3rem; }
+}
