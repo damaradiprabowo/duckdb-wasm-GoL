@@ -1,0 +1,357 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Game of Life · DuckDB-WASM</title>
+    <link rel="icon" type="image/x-icon" href="/favicon.ico" />
+    <link rel="stylesheet" href="/src/style.css" />
+  </head>
+  <body>
+    <main>
+      <header>
+        <h1>Game of Life</h1>
+        <p class="subtitle">
+          Every generation is a single SQL query, running in
+          <code>DuckDB-WASM</code> in your browser.
+        </p>
+      </header>
+
+      <section class="card board-card">
+        <div class="canvas-wrap">
+          <canvas id="board"></canvas>
+        </div>
+
+        <div class="toolbar">
+          <div class="group">
+            <button id="play" class="btn btn-primary">Play</button>
+            <button id="step" class="btn">Step</button>
+            <button id="clear" class="btn">Clear</button>
+            <button id="random" class="btn">Random</button>
+          </div>
+
+          <div class="group">
+            <label class="field">
+              <span>Speed</span>
+              <input id="speed" type="range" min="1" max="30" value="10" />
+              <span class="field-val"><b id="speed-val">10</b>/s</span>
+            </label>
+
+            <label class="field">
+              <span>Pattern</span>
+              <select id="preset">
+                <option value="">Choose…</option>
+                <option value="glider">Glider</option>
+                <option value="pulsar">Pulsar</option>
+                <option value="gun">Gosper gun</option>
+                <option value="lwss">Spaceship</option>
+              </select>
+            </label>
+          </div>
+        </div>
+
+        <div class="status">
+          <span id="status" class="status-msg">Booting DuckDB-WASM…</span>
+          <span class="stats">
+            <span>gen <b id="gen">0</b></span>
+            <span>live <b id="live">0</b></span>
+            <span><b id="fps">—</b> ms/step</span>
+          </span>
+        </div>
+
+        <p class="hint">Click or drag on the grid to draw cells while paused.</p>
+      </section>
+
+      <section class="card explainer">
+        <h2>How it works</h2>
+        <p class="lead">
+          There is no simulation loop in JavaScript. The board is a table, and
+          one query turns this generation into the next. Here is that query
+          taken apart, one step at a time, with the SQL that does each job.
+        </p>
+
+        <ol class="steps">
+          <li>
+            <span class="n">1</span>
+            <div>
+              <h3>Keep only the cells that are alive</h3>
+              <p>
+                A grid this size holds six thousand squares, but at any moment
+                most of them are dead, and a dead square is just empty space. So
+                we don't store the grid at all. We keep one row per living cell
+                and nothing else, which means an empty board is an empty table.
+                The only other thing we need is a small lookup table,
+                <code>deltas</code>, listing the eight directions a neighbour can
+                sit in, written out once so we never repeat them.
+              </p>
+              <pre class="step-sql"><code><span class="k">CREATE TABLE</span> cells (x <span class="k">INTEGER</span>, y <span class="k">INTEGER</span>);
+
+<span class="c">-- the eight directions a neighbour can sit in</span>
+<span class="k">CREATE TABLE</span> deltas (dx <span class="k">INTEGER</span>, dy <span class="k">INTEGER</span>);
+<span class="k">INSERT INTO</span> deltas <span class="k">VALUES</span>
+  (-1,-1), (-1,0), (-1,1),
+  ( 0,-1),         ( 0,1),
+  ( 1,-1), ( 1,0), ( 1,1);</code></pre>
+            </div>
+          </li>
+
+          <li>
+            <span class="n">2</span>
+            <div>
+              <h3>Let every living cell vote for its neighbours</h3>
+              <p>
+                A living cell affects the eight squares around it, so we pair
+                each cell with all eight offsets. That is what a
+                <code>CROSS JOIN</code> does: one cell times eight directions
+                gives eight new coordinates, one per neighbour. Picture each cell
+                dropping a vote onto every square beside it. Five living cells
+                cast forty votes, and plenty of those votes land on the same
+                square.
+              </p>
+              <pre class="step-sql"><code><span class="k">SELECT</span> cells.x + deltas.dx <span class="k">AS</span> x,
+       cells.y + deltas.dy <span class="k">AS</span> y
+<span class="k">FROM</span> cells <span class="k">CROSS JOIN</span> deltas;</code></pre>
+            </div>
+          </li>
+
+          <li>
+            <span class="n">3</span>
+            <div>
+              <h3>Count the votes on each square</h3>
+              <p>
+                Now we group the votes by coordinate. The size of each group is
+                how many living neighbours that square has, so a square with
+                three votes had three living neighbours. While we are here we
+                drop anything that fell off the edge of the world, since a cell
+                born outside the grid would only die anyway. After this step
+                every square that matters carries a single number.
+              </p>
+              <pre class="step-sql"><code><span class="k">SELECT</span> x, y, <span class="f">COUNT</span>(*) <span class="k">AS</span> n
+<span class="k">FROM</span> neighbours
+<span class="k">WHERE</span> x <span class="k">BETWEEN</span> <span class="num">0</span> <span class="k">AND</span> <span class="num">99</span>
+  <span class="k">AND</span> y <span class="k">BETWEEN</span> <span class="num">0</span> <span class="k">AND</span> <span class="num">59</span>
+<span class="k">GROUP BY</span> x, y;</code></pre>
+            </div>
+          </li>
+
+          <li>
+            <span class="n">4</span>
+            <div>
+              <h3>Apply Conway's one rule</h3>
+              <p>
+                The whole game lives in this one <code>WHERE</code> clause. A
+                square comes alive next generation if it has exactly three living
+                neighbours. A square that is already alive also survives on two.
+                Everything else goes dark. The plain-English rule, born on three
+                and survive on two, is almost word for word the condition below.
+                The <code>EXISTS</code> check is just asking whether the square
+                was already alive in the current board.
+              </p>
+              <pre class="step-sql"><code><span class="k">SELECT</span> x, y <span class="k">FROM</span> counts
+<span class="k">WHERE</span> n = <span class="num">3</span>
+   <span class="k">OR</span> (n = <span class="num">2</span> <span class="k">AND</span> <span class="k">EXISTS</span> (
+         <span class="k">SELECT</span> <span class="num">1</span> <span class="k">FROM</span> cells
+         <span class="k">WHERE</span> cells.x = counts.x
+           <span class="k">AND</span> cells.y = counts.y));</code></pre>
+            </div>
+          </li>
+
+          <li>
+            <span class="n">5</span>
+            <div>
+              <h3>Swap the result in, then draw it</h3>
+              <p>
+                The query hands back the full set of living cells for the next
+                generation, so we drop it straight into the <code>cells</code>
+                table, replacing what was there. Then JavaScript reads the table
+                back and paints a square for every row. That is one tick. Press
+                play and the same query runs again, and again, as fast as you
+                like. Nothing here remembers the past or plans ahead. Each
+                generation is built only from the one before it.
+              </p>
+              <pre class="step-sql"><code><span class="k">CREATE OR REPLACE TABLE</span> cells <span class="k">AS</span>
+<span class="k">SELECT</span> * <span class="k">FROM</span> next_cells;
+
+<span class="c">-- then JavaScript reads it back and draws</span>
+<span class="k">SELECT</span> x, y <span class="k">FROM</span> cells;</code></pre>
+            </div>
+          </li>
+        </ol>
+
+        <h2 class="snippet-title">All five steps, assembled</h2>
+        <p class="lead">
+          The engine runs steps 2 to 4 as a single statement each tick. Steps 2
+          and 3 become the named blocks <code>neighbours</code> and
+          <code>counts</code>, and step 4 reads from them.
+        </p>
+        <pre class="snippet"><code><span class="k">WITH</span> neighbours <span class="k">AS</span> (
+  <span class="c">-- step 2: every living cell votes for its 8 neighbours</span>
+  <span class="k">SELECT</span> cells.x + deltas.dx <span class="k">AS</span> x,
+         cells.y + deltas.dy <span class="k">AS</span> y
+  <span class="k">FROM</span> cells <span class="k">CROSS JOIN</span> deltas
+),
+counts <span class="k">AS</span> (
+  <span class="c">-- step 3: count the votes, keeping only in-bounds squares</span>
+  <span class="k">SELECT</span> x, y, <span class="f">COUNT</span>(*) <span class="k">AS</span> n
+  <span class="k">FROM</span> neighbours
+  <span class="k">WHERE</span> x <span class="k">BETWEEN</span> <span class="num">0</span> <span class="k">AND</span> <span class="num">99</span> <span class="k">AND</span> y <span class="k">BETWEEN</span> <span class="num">0</span> <span class="k">AND</span> <span class="num">59</span>
+  <span class="k">GROUP BY</span> x, y
+)
+<span class="c">-- step 4: born on 3, survive on 2</span>
+<span class="k">SELECT</span> x, y <span class="k">FROM</span> counts
+<span class="k">WHERE</span> n = <span class="num">3</span>
+   <span class="k">OR</span> (n = <span class="num">2</span> <span class="k">AND</span> <span class="k">EXISTS</span> (
+         <span class="k">SELECT</span> <span class="num">1</span> <span class="k">FROM</span> cells
+         <span class="k">WHERE</span> cells.x = counts.x <span class="k">AND</span> cells.y = counts.y));</code></pre>
+      </section>
+
+      <section class="card essay">
+        <h2>A universe with one law</h2>
+
+        <p>Watch the board for a while and you start naming things.</p>
+        <p>
+          That little arrow sliding diagonally across the grid is a glider. The
+          machine in the corner that spits one out every thirty generations is a
+          gun. Before long you're talking about predators, breeders, spaceships,
+          collisions.
+        </p>
+        <p>The strange thing is that none of those things exist.</p>
+        <p>
+          There are no gliders in the code. No spaceships. No guns. The rule
+          never mentions them. Every cell knows only three facts: how many
+          neighbours it has, whether it is alive, and whether it should survive
+          to the next generation.
+        </p>
+        <p>The glider isn't part of the rule.</p>
+        <p>It emerges from it.</p>
+
+        <h3>Things that were never programmed</h3>
+        <p>And gliders are just the beginning.</p>
+        <p>
+          Given enough space, Conway's Life can build logic gates, memory,
+          clocks, and eventually a complete computer. People have assembled
+          working <a href="https://en.wikipedia.org/wiki/Turing_completeness" target="_blank" rel="noopener">Turing machines</a> from nothing but these flickering cells. Others
+          have built self-replicating patterns that consume empty space to
+          manufacture copies of themselves nearby.
+        </p>
+        <p>
+          At some point the distinction between "pattern" and "organism" starts
+          to feel negotiable.
+        </p>
+        <p>
+          Stephen Hawking and Leonard Mlodinow used Life as an example in
+          <em>The Grand Design</em>. Their point was simple and unsettling: a law
+          small enough to fit on a napkin can generate structures complicated
+          enough to look alive.
+        </p>
+
+        <h3>Two descriptions of the same world</h3>
+        <p>There are at least two ways to describe what you're looking at.</p>
+        <p>
+          One is microscopic: millions of individual cells switching on and off
+          according to the rule. Perfectly accurate. Almost useless.
+        </p>
+        <p>
+          The other is macroscopic: that glider will hit that block in nine
+          generations.
+        </p>
+        <p>
+          The second description leaves out almost everything. Yet it is often
+          the more useful one.
+        </p>
+        <p>
+          Hawking called this <em>model-dependent realism</em>. A thing is as
+          real as the model that successfully describes it. The glider is not an
+          illusion hiding behind the cells. It is a higher-level fact about the
+          cells.
+        </p>
+        <p>
+          Physics gives rise to chemistry. Chemistry gives rise to biology.
+          Biology gives rise to minds.
+        </p>
+        <p>Reality seems to be built from layers like this all the way up.</p>
+
+        <h3>Determined, yet unknowable</h3>
+        <p>Life is completely deterministic.</p>
+        <p>
+          Once the initial pattern is placed, every future generation is fixed.
+          Nothing can happen except what the rule permits. The entire future
+          already exists implicitly in the starting state.
+        </p>
+        <p>Yet knowing the future is another matter.</p>
+        <p>
+          For most interesting patterns there is no shortcut. If you want to know
+          what generation 10,000 looks like, you must compute generations 1
+          through 9,999 first. The system is deterministic, but not necessarily
+          compressible.
+        </p>
+        <p>I still find that difficult to sit with.</p>
+
+        <blockquote class="pullquote">
+          The future can be settled long before it becomes knowable.
+        </blockquote>
+
+        <h3>The future is written, but unreadable</h3>
+        <p>This is the part that lingers.</p>
+        <p>
+          If human beings are ultimately physical systems, then in principle we
+          are no different. We are arrangements of matter evolving under fixed
+          laws. Every thought, decision, regret, ambition, and act of love would
+          follow from prior states of the universe.
+        </p>
+        <p>But the gap between principle and practice is enormous.</p>
+        <p>
+          Nobody predicts human behaviour from quantum mechanics. The equations
+          are too detailed and the system too large. Instead we use a rougher
+          language. We talk about intentions, beliefs, goals, choices.
+        </p>
+        <p>Hawking called these <em>effective theories</em>.</p>
+        <p>Most of us call it free will.</p>
+        <p>
+          Perhaps free will is not an alternative to physical law. Perhaps it is
+          simply the name we give to a level of description that works.
+        </p>
+
+        <h3>No one is playing</h3>
+        <p>Notice what is missing from this world.</p>
+        <p>
+          No hand reaches into the grid. No player nudges the pieces along. No
+          hidden intelligence guides the outcome.
+        </p>
+        <p>The rule does everything.</p>
+        <p>
+          Motion. Collision. Replication. Complexity. The appearance of purpose.
+          Even the appearance of life.
+        </p>
+        <p>All of it follows from a law and an initial condition.</p>
+        <p>
+          That was the provocation at the heart of <em>The Grand Design</em>.
+          Given the right laws, a universe may not require ongoing supervision.
+          Galaxies, stars, planets, living things, and eventually minds capable
+          of asking why they exist could all emerge as consequences.
+        </p>
+        <p>No intervention required.</p>
+        <p>
+          This little simulation is about the smallest version of that idea I
+          know.
+        </p>
+        <p class="coda">One law.</p>
+        <p class="coda">A handful of living cells.</p>
+        <p class="coda">Everything else is consequence.</p>
+
+        <p class="attribution">
+          After Stephen Hawking &amp; Leonard Mlodinow,
+          <em>The Grand Design</em> (2010).
+        </p>
+      </section>
+
+      <footer>
+        vibe coded by <a href="https://damar.fyi" target="_blank" rel="noopener">damar</a>
+        <span class="dot">·</span>
+        <a href="https://github.com/damaradiprabowo/duckdb-wasm-GoL" target="_blank" rel="noopener">GitHub</a>
+      </footer>
+    </main>
+
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
